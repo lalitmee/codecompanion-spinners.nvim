@@ -71,6 +71,28 @@ local function close_window()
   vim.cmd("redraw!")
 end
 
+--- Recomputes the window position from the current editor size.
+--- Only editor-relative windows are re-anchored: "win"/"cursor" anchored
+--- windows already track their anchor, and their row/col have a different
+--- meaning. User-pinned row/col are kept as-is.
+--- @param win number The window handle to reposition.
+local function reposition_window(win)
+  local window_config = (config.get().native or {}).window or {}
+  if (window_config.relative or "editor") ~= "editor" then
+    return
+  end
+  local row = window_config.row
+  local col = window_config.col
+  if row == nil then
+    row = vim.o.lines - 5
+  end
+  if col == nil then
+    col = vim.o.columns - 35
+  end
+  -- 'relative' is required when passing row/col to nvim_win_set_config.
+  pcall(vim.api.nvim_win_set_config, win, { relative = "editor", row = row, col = col })
+end
+
 local function update_spinner_display()
   if not (ui.win and vim.api.nvim_win_is_valid(ui.win) and ui.buf and vim.api.nvim_buf_is_valid(ui.buf)) then
     close_window()
@@ -101,32 +123,48 @@ local function start_spinner()
   -- Get native configuration
   local native_config = config.get().native or {}
 
-  -- Create buffer
-  ui.buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = ui.buf })
+  if ui.win and vim.api.nvim_win_is_valid(ui.win) and ui.buf and vim.api.nvim_buf_is_valid(ui.buf) then
+    -- Reuse the window left over from the previous activity burst (e.g. the
+    -- "Done!" window whose deferred close was cancelled by this new state).
+    -- Opening a new window here would orphan the old one: its handle was
+    -- overwritten below, so nothing would ever close it.
+    reposition_window(ui.win)
+  else
+    -- Defensive: if a stale window survived without its buffer (e.g. the
+    -- buffer was wiped out-of-band), close it now so it cannot be orphaned
+    -- when ui.win is overwritten below.
+    if ui.win and vim.api.nvim_win_is_valid(ui.win) then
+      pcall(vim.api.nvim_win_close, ui.win, false)
+      ui.win = nil
+    end
 
-  -- Set up window configuration with user defaults
-  local win_config = vim.tbl_deep_extend("force", {
-    relative = "editor",
-    width = 30,
-    height = 1,
-    row = vim.o.lines - 5,
-    col = vim.o.columns - 35,
-    style = "minimal",
-    border = "rounded",
-    title = " CodeCompanion ",
-    title_pos = "center",
-    focusable = false,
-    noautocmd = true,
-  }, native_config.window or {})
+    -- Create buffer
+    ui.buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = ui.buf })
 
-  -- Create window
-  ui.win = vim.api.nvim_open_win(ui.buf, false, win_config)
+    -- Set up window configuration with user defaults
+    local win_config = vim.tbl_deep_extend("force", {
+      relative = "editor",
+      width = 30,
+      height = 1,
+      row = vim.o.lines - 5,
+      col = vim.o.columns - 35,
+      style = "minimal",
+      border = "rounded",
+      title = " CodeCompanion ",
+      title_pos = "center",
+      focusable = false,
+      noautocmd = true,
+    }, native_config.window or {})
 
-  -- Apply any additional window options
-  if native_config.win_options then
-    for option, value in pairs(native_config.win_options) do
-      pcall(vim.api.nvim_set_option_value, option, value, { win = ui.win })
+    -- Create window
+    ui.win = vim.api.nvim_open_win(ui.buf, false, win_config)
+
+    -- Apply any additional window options
+    if native_config.win_options then
+      for option, value in pairs(native_config.win_options) do
+        pcall(vim.api.nvim_set_option_value, option, value, { win = ui.win })
+      end
     end
   end
 
@@ -223,6 +261,20 @@ function M.setup()
       )
     end
   end
+
+  -- Keep the spinner anchored to the editor corner across terminal resizes.
+  -- Without this, a window created at an old size keeps its stale absolute
+  -- row/col after the editor is resized (clamped on-screen, but drifting off
+  -- the corner once the terminal grows again).
+  local group = vim.api.nvim_create_augroup("CodeCompanionSpinnersNative", { clear = true })
+  vim.api.nvim_create_autocmd("VimResized", {
+    group = group,
+    callback = function()
+      if ui.win and vim.api.nvim_win_is_valid(ui.win) then
+        reposition_window(ui.win)
+      end
+    end,
+  })
 end
 
 return M

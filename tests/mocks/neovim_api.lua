@@ -7,6 +7,15 @@ M._augroups = {}
 M._next_augroup_id = 1000
 M._next_autocmd_id = 2000
 
+-- Observability for window lifecycle tests (leak detection)
+M._open_win_calls = 0 -- number of nvim_open_win invocations
+M._win_close_calls = 0 -- number of nvim_win_close invocations
+M._closed_wins = {} -- set of window ids that have been closed
+M._last_win_config = nil -- last config passed to nvim_win_set_config
+M._deferred = {} -- callbacks captured by the deferred-mock (see _G.vim.defer_fn shim)
+M._next_win_id = 999 -- next window id handed out by nvim_open_win
+M._last_win_id = nil -- id returned by the most recent nvim_open_win
+
 -- Mock vim.api
 M.api = {
   nvim_create_augroup = function(name, opts)
@@ -81,15 +90,27 @@ M.api = {
   end,
 
   nvim_open_win = function(_bufnr, _enter, _opts)
-    return 999 -- Mock window ID
+    M._open_win_calls = M._open_win_calls + 1
+    -- Hand out a unique id per open, like real nvim: a newly opened window
+    -- is never a previously closed id (fixes "new window seen as closed"
+    -- when ids were a constant 999).
+    local winid = M._next_win_id
+    M._next_win_id = M._next_win_id + 1
+    M._last_win_id = winid
+    return winid
   end,
 
-  nvim_win_close = function(_winid, _force)
-    -- Mock window close
+  nvim_win_close = function(winid, _force)
+    M._win_close_calls = M._win_close_calls + 1
+    M._closed_wins[winid] = true
   end,
 
   nvim_create_buf = function(_listed, _scratch)
     return 1000 + math.random(1000) -- Mock buffer ID
+  end,
+
+  nvim_buf_delete = function(_bufnr, _opts)
+    -- Mock buffer deletion
   end,
 
   nvim_buf_set_lines = function(_bufnr, _start, _end_, _strict, _lines)
@@ -112,16 +133,18 @@ M.api = {
     -- Mock setting extmark
   end,
 
-  nvim_win_is_valid = function(_win)
-    return true -- Mock window is valid
+  nvim_win_is_valid = function(win)
+    -- Valid unless closed; safe because ids are unique per open, so a
+    -- freshly opened window can never collide with a closed one.
+    return not M._closed_wins[win]
   end,
 
   nvim_buf_is_valid = function(_buf)
     return true -- Mock buffer is valid
   end,
 
-  nvim_win_set_config = function(_win, _config)
-    -- Mock setting window config
+  nvim_win_set_config = function(_win, cfg)
+    M._last_win_config = cfg -- Record for assertions
   end,
 
   nvim_set_option_value = function(_name, _value, _opts)
@@ -269,6 +292,13 @@ M.reset = function()
   M._augroups = {}
   M._next_augroup_id = 1000
   M._next_autocmd_id = 2000
+  M._open_win_calls = 0
+  M._win_close_calls = 0
+  M._closed_wins = {}
+  M._last_win_config = nil
+  M._deferred = {}
+  M._next_win_id = 999
+  M._last_win_id = nil
 end
 
 return M
